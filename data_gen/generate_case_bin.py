@@ -4,24 +4,12 @@ generate_case_bin.py
 
 Generate reproducible test cases for dense & sparse matrix multiply,
 and write outputs in FP32 row-major raw binary format so CUDA/C++ programs
-can read them easily.
+can read them easily. Also write raw CSR arrays in binary:
+  - A_data.bin    (float32)  length = nnz
+  - A_indices.bin (int32)    length = nnz
+  - A_indptr.bin  (int32)    length = m+1
 
-Outputs (out_dir/):
-  - A_dense.bin       # float32, row-major, shape (m,k)
-  - B.bin             # float32, row-major, shape (k,n)
-  - C_ref.bin         # float32, row-major, shape (m,n)
-  - A.npz             # scipy CSR saved (for Python)
-  - A_data.npy, A_indices.npy, A_indptr.npy
-  - A_dense.npy, B.npy, C_ref.npy
-  - meta.json         # JSON with shapes, dtype, nnz
-
-Usage example:
-  python data_gen/generate_case_bin.py --m 1024 --k 1024 --n 1024 --density 0.05 --seed 42 --out case_out
-
-Notes:
-  - All numeric outputs use float32.
-  - Raw binary files are written in C-order (row-major), packed float32 values.
-  - C/C++ code can read them with fread into float buffer and then reshape.
+And keep python-friendly copies (A_data.npy etc) for convenience.
 """
 
 import os
@@ -33,16 +21,15 @@ import scipy.sparse as sp
 
 def write_raw_bin(path: str, arr: np.ndarray):
     """
-    Write numpy array in row-major float32 raw binary for easy C/C++ reading.
+    Write numpy array in raw binary (C-order) for easy C/C++ reading.
     """
-    assert arr.dtype == np.float32, "Array must be float32"
-    # ensure C-order
+    # ensure contiguous
     c_arr = np.ascontiguousarray(arr)
     with open(path, "wb") as f:
         f.write(c_arr.tobytes())
 
 
-def generate_unstructured(m, k, n, density, seed, out_dir):
+def generate_unstructured(m, k, n, density, seed):
     rng = np.random.default_rng(seed)
     # generate sparse CSR A with float32 values
     A = sp.random(
@@ -64,21 +51,27 @@ def generate_unstructured(m, k, n, density, seed, out_dir):
 
 def save_all(out_dir, A_csr, A_dense, B, C_ref):
     os.makedirs(out_dir, exist_ok=True)
-    # 1) save raw binaries for C/C++ consumption
+
+    # 1) raw dense binaries
     write_raw_bin(os.path.join(out_dir, "A_dense.bin"), A_dense)
     write_raw_bin(os.path.join(out_dir, "B.bin"), B)
     write_raw_bin(os.path.join(out_dir, "C_ref.bin"), C_ref)
 
-    # 2) save numpy arrays (python-friendly)
+    # 2) numpy copies (python-friendly)
     np.save(os.path.join(out_dir, "A_dense.npy"), A_dense)
     np.save(os.path.join(out_dir, "B.npy"), B)
     np.save(os.path.join(out_dir, "C_ref.npy"), C_ref)
 
-    # 3) save CSR arrays and .npz
+    # 3) CSR .npz and CSR raw binary arrays
     sp.save_npz(os.path.join(out_dir, "A.npz"), A_csr)
     np.save(os.path.join(out_dir, "A_data.npy"), A_csr.data)
     np.save(os.path.join(out_dir, "A_indices.npy"), A_csr.indices)
     np.save(os.path.join(out_dir, "A_indptr.npy"), A_csr.indptr)
+
+    # write raw CSR binaries (A_data.bin float32, A_indices.bin int32, A_indptr.bin int32)
+    write_raw_bin(os.path.join(out_dir, "A_data.bin"), A_csr.data.astype(np.float32))
+    write_raw_bin(os.path.join(out_dir, "A_indices.bin"), A_csr.indices.astype(np.int32))
+    write_raw_bin(os.path.join(out_dir, "A_indptr.bin"), A_csr.indptr.astype(np.int32))
 
     # 4) save meta info
     meta = {
@@ -105,7 +98,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    A_csr, A_dense, B, C_ref = generate_unstructured(args.m, args.k, args.n, args.density, args.seed, args.out)
+    A_csr, A_dense, B, C_ref = generate_unstructured(args.m, args.k, args.n, args.density, args.seed)
     save_all(args.out, A_csr, A_dense, B, C_ref)
     print("Generated case:")
     print(f"  A shape: ({args.m}, {args.k}), nnz: {A_csr.nnz}, density actual: {A_csr.nnz / (args.m * args.k):.6f}")
@@ -115,7 +108,9 @@ def main():
     print("  - A_dense.bin  (raw float32 row-major)")
     print("  - B.bin        (raw float32 row-major)")
     print("  - C_ref.bin    (raw float32 row-major)")
-    print("  - A.npz, A_data.npy, A_indices.npy, A_indptr.npy")
+    print("  - A_data.bin   (float32 raw CSR values)")
+    print("  - A_indices.bin (int32 raw CSR col indices)")
+    print("  - A_indptr.bin  (int32 raw CSR row ptrs)")
     print("  - meta.json")
 
 if __name__ == "__main__":
